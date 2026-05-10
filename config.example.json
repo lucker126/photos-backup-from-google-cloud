@@ -4,11 +4,12 @@
     "TEMP_DIR": "temp_zip",
     "STATE_FILE": "backup_manifest.json",
     "DAYS_TO_KEEP_IN_CLOUD": 180,
-    "SKIP_PERIOD_START": "",
-    "SKIP_PERIOD_END": "",
     "STOP_AT_DATE": "",
     "HEADLESS_MODE": false,
     "ALLOW_CLOUD_DELETE": true,
-    "DRY_RUN_DELETE": false,
-    "MAX_DELETE_BLOCKS_PER_RUN": 0
+    "DRY_RUN_DELETE": true,
+    "MAX_DELETE_BLOCKS_PER_RUN": 1,
+    "LOG_LEVEL": "WARNING",
+    "SCROLL_STEP_PIXELS": 500,
+    "SCROLL_WAIT_MS": 1500
 }

@@ -5,6 +5,7 @@ import zipfile
 import logging
 import json
 import hashlib
+import time
 from datetime import datetime, timedelta
 from PIL import Image, ExifTags
 from playwright.sync_api import sync_playwright
@@ -19,13 +20,14 @@ DEFAULT_CONFIG = {
     "TEMP_DIR": "temp_zip",
     "STATE_FILE": "backup_manifest.json",
     "DAYS_TO_KEEP_IN_CLOUD": 180,
-    "SKIP_PERIOD_START": "",
-    "SKIP_PERIOD_END": "",
     "STOP_AT_DATE": "",
     "HEADLESS_MODE": False,
     "ALLOW_CLOUD_DELETE": True,
-    "DRY_RUN_DELETE": False,
-    "MAX_DELETE_BLOCKS_PER_RUN": 0
+    "DRY_RUN_DELETE": True,
+    "MAX_DELETE_BLOCKS_PER_RUN": 1,
+    "LOG_LEVEL": "WARNING",
+    "SCROLL_STEP_PIXELS": 500,
+    "SCROLL_WAIT_MS": 1500
 }
 
 if not os.path.exists(CONFIG_FILE):
@@ -49,6 +51,24 @@ HEADLESS_MODE = config.get("HEADLESS_MODE", False)
 ALLOW_CLOUD_DELETE = config.get("ALLOW_CLOUD_DELETE", True)
 DRY_RUN_DELETE = config.get("DRY_RUN_DELETE", False)
 MAX_DELETE_BLOCKS_PER_RUN = config.get("MAX_DELETE_BLOCKS_PER_RUN", 0)
+LOG_LEVEL_NAME = str(config.get("LOG_LEVEL", "WARNING")).upper()
+
+def get_int_config(name, default, minimum):
+    try:
+        return max(minimum, int(config.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+SCROLL_STEP_PIXELS = get_int_config("SCROLL_STEP_PIXELS", 500, 100)
+SCROLL_WAIT_MS = get_int_config("SCROLL_WAIT_MS", 1500, 500)
+RUN_LEVEL = 25
+logging.addLevelName(RUN_LEVEL, "RUN")
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": RUN_LEVEL,
+}
+LOG_LEVEL = LOG_LEVELS.get(LOG_LEVEL_NAME, RUN_LEVEL)
 
 def parse_date(date_str):
     if date_str:
@@ -56,43 +76,26 @@ def parse_date(date_str):
         except ValueError: pass
     return None
 
-SKIP_START = parse_date(config.get("SKIP_PERIOD_START"))
-SKIP_END = parse_date(config.get("SKIP_PERIOD_END"))
 STOP_AT = parse_date(config.get("STOP_AT_DATE"))
-
-def update_skip_period(photo_date):
-    """Расширяет сохраненный период скачанных файлов и записывает его в config.json."""
-    global SKIP_START, SKIP_END
-    if not photo_date: return False
-    
-    updated = False
-    if not SKIP_START or photo_date < SKIP_START:
-        SKIP_START = photo_date
-        updated = True
-    if not SKIP_END or photo_date > SKIP_END:
-        SKIP_END = photo_date
-        updated = True
-        
-    if updated:
-        config["SKIP_PERIOD_START"] = SKIP_START.strftime("%Y-%m-%d")
-        config["SKIP_PERIOD_END"] = SKIP_END.strftime("%Y-%m-%d")
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logging.error(f"❌ Не удалось сохранить конфиг: {e}")
-        return True
-    return False
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(os.path.join(BASE_DIR, "app.log"), encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+
+def log_run(message):
+    logging.log(RUN_LEVEL, message)
+
+def log_info(message):
+    logging.info(message)
+
+def log_debug(message):
+    logging.debug(message)
 
 # Создаем временную папку, если ее нет
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -137,14 +140,31 @@ def load_manifest():
     manifest.setdefault("covered_dates", {})
     return manifest
 
-def save_manifest(manifest):
-    tmp_path = f"{STATE_FILE}.tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, STATE_FILE)
-    except Exception as e:
-        logging.error(f"❌ Не удалось сохранить manifest: {e}")
+def save_manifest(manifest, attempts=8, retry_delay=0.15):
+    tmp_path = f"{STATE_FILE}.tmp.{os.getpid()}"
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, STATE_FILE)
+            return True
+        except OSError as e:
+            last_error = e
+            winerror = getattr(e, "winerror", None)
+            if winerror in (5, 32) and attempt < attempts:
+                time.sleep(retry_delay * attempt)
+                continue
+            break
+        except Exception as e:
+            last_error = e
+            break
+
+    logging.error(f"❌ Не удалось сохранить manifest после {attempts} попыток: {last_error}")
+    return False
 
 def get_manifest_block(manifest, block_id, aria_label, photo_date):
     blocks = manifest.setdefault("blocks", {})
@@ -237,19 +257,45 @@ def rebuild_date_coverage_from_blocks(manifest):
             changed = True
 
     if changed:
-        save_manifest(manifest)
+        return save_manifest(manifest)
+    return True
 
 def mark_block_error(manifest, block_id, error_message):
     entry = manifest["blocks"][block_id]
     entry["last_error"] = error_message
     entry["last_error_at"] = now_iso()
-    save_manifest(manifest)
+    return save_manifest(manifest)
 
 def mark_block_deleted(manifest, block_id):
+    deleted_at = now_iso()
+    blocks = manifest.setdefault("blocks", {})
     entry = manifest["blocks"][block_id]
     entry["deleted_from_cloud"] = True
-    entry["deleted_at"] = now_iso()
-    save_manifest(manifest)
+    entry["deleted_at"] = deleted_at
+    cascaded_count = 0
+    for child_id, child_entry in blocks.items():
+        if child_id == block_id:
+            continue
+        if child_entry.get("covered_by_block_id") != block_id:
+            continue
+        if child_entry.get("deleted_from_cloud"):
+            continue
+        child_entry["deleted_from_cloud"] = True
+        child_entry["deleted_at"] = deleted_at
+        child_entry["deleted_with_block_id"] = block_id
+        cascaded_count += 1
+    if not save_manifest(manifest):
+        raise RuntimeError("Cloud delete succeeded, but manifest could not be saved")
+    return cascaded_count
+
+def wait_for_delete_completion(page, safe_label):
+    block_selector = f'div[role="checkbox"][aria-label="{safe_label}"]'
+    page.wait_for_selector('div[role="dialog"]:visible', state='hidden', timeout=15000)
+    try:
+        page.wait_for_selector(block_selector, state='detached', timeout=15000)
+    except Exception as e:
+        if page.locator(block_selector).count() > 0:
+            raise RuntimeError("Google Photos did not remove the selected block after delete confirmation") from e
 
 def get_verified_file_count(entry):
     files = entry.get("files") or []
@@ -355,7 +401,7 @@ def process_downloaded_file(download_path, ui_fallback_year):
     is_zip = download_path.lower().endswith('.zip')
     
     if is_zip:
-        logging.info("📦 Распаковка архива...")
+        log_debug("📦 Распаковка архива...")
         try:
             with zipfile.ZipFile(download_path, 'r') as zip_ref:
                 safe_extract_zip(zip_ref, extract_folder)
@@ -367,7 +413,7 @@ def process_downloaded_file(download_path, ui_fallback_year):
             logging.error(f"❌ Ошибка распаковки архива: {e}")
             return {"success": False, "verified": False, "processed": 0, "new": 0, "size": 0, "files": []}
     else:
-        logging.info("🖼️ Обработка одиночного медиафайла...")
+        log_debug("🖼️ Обработка одиночного медиафайла...")
         filename = os.path.basename(download_path)
         if not filename.endswith(".json"):
             temp_file_path = os.path.join(extract_folder, filename)
@@ -440,7 +486,7 @@ def process_downloaded_file(download_path, ui_fallback_year):
     if os.path.exists(download_path):
         os.remove(download_path)
         
-    logging.info(f"✅ Успешно обработано {files_processed} файлов.")
+    log_info(f"✅ Успешно обработано {files_processed} файлов.")
     return {
         "success": files_processed > 0,
         "verified": files_processed > 0 and verified_files == files_processed,
@@ -452,7 +498,7 @@ def process_downloaded_file(download_path, ui_fallback_year):
 
 def main():
     with sync_playwright() as p:
-        logging.info("🌐 Запуск браузера...")
+        log_run("🌐 Запуск Google Photos backup bot")
         # Запускаем браузер с сохранением сессии (куки, логин)
         browser = p.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
@@ -471,18 +517,18 @@ def main():
         page.wait_for_timeout(2000)
         
         if "accounts.google.com" in page.url or "signin" in page.url:
-            logging.info("⏳ Требуется авторизация... (Авторизуйтесь, у вас есть 5 минут)")
+            log_debug("⏳ Требуется авторизация... (Авторизуйтесь, у вас есть 5 минут)")
             page.wait_for_url("https://photos.google.com/**", timeout=300000)
-            logging.info("✅ Авторизация пройдена!")
+            log_debug("✅ Авторизация пройдена!")
             page.wait_for_timeout(3000) # Даем интерфейсу загрузиться
             
-        logging.info("🔍 Поиск фотографий в галерее...")
+        log_debug("🔍 Поиск фотографий в галерее...")
         try:
             # Ждем появления чекбоксов. state='attached' найдет их, даже если они визуально скрыты без наведения
             page.wait_for_selector('div[role="checkbox"][aria-label]:not([aria-checked="true"])', state='attached', timeout=15000)
-            logging.info("✅ Галерея загружена, начинаем работу.")
+            log_debug("✅ Галерея загружена, начинаем работу.")
         except Exception:
-            logging.info("🏁 Фотографии не найдены. Галерея пуста либо скрипт дошел до конца. Завершаем работу.")
+            log_run("🏁 Фотографии не найдены. Галерея пуста либо скрипт дошел до конца. Завершаем работу.")
             browser.close()
             return
         
@@ -501,8 +547,8 @@ def main():
         }
         manifest = load_manifest()
         rebuild_date_coverage_from_blocks(manifest)
-        save_manifest(manifest)
         delete_blocks_this_run = 0
+        delete_limit_reached = False
         
         while True:
             try:
@@ -510,7 +556,7 @@ def main():
                 # Таймаут 15 секунд для перехода между группами
                 page.wait_for_selector('div[role="checkbox"][aria-label]:not([aria-checked="true"])', state='attached', timeout=15000)
             except Exception:
-                logging.info("🏁 Больше не найдено групп фотографий (или истекло время ожидания). Скрипт завершает работу.")
+                log_debug("🏁 Больше не найдено групп фотографий (или истекло время ожидания). Скрипт завершает работу.")
                 break
 
             # Находим галочки, которые мы еще не обрабатывали в этом сеансе
@@ -542,14 +588,14 @@ def main():
                     continue
                     
             if should_stop_script:
-                logging.info(f"🛑 Достигнута дата остановки ({config.get('STOP_AT_DATE')}). Завершаем работу.")
+                log_run(f"🛑 Достигнута дата остановки ({config.get('STOP_AT_DATE')}). Завершаем работу.")
                 break
                 
             if not group_checkbox:
                 if scroll_attempts > 30:
-                    logging.info("🏁 Достигнут конец галереи или зависла прокрутка. Завершаем работу.")
+                    log_debug("🏁 Достигнут конец галереи или зависла прокрутка. Завершаем работу.")
                     break
-                logging.info("⏬ Все видимые фото обработаны. Плавная прокрутка вниз...")
+                log_debug("⏬ Все видимые фото обработаны. Плавная прокрутка вниз...")
                 
                 # Умная прокрутка: сперва докручиваем до последнего видимого чекбокса
                 if checkboxes:
@@ -561,8 +607,8 @@ def main():
                 # Затем ставим мышь в центр экрана (чтобы скролл точно сработал) и крутим колесо
                 page.locator('body').focus()
                 page.mouse.move(960, 540) # Центр экрана 1920x1080
-                page.mouse.wheel(0, 700) # Уменьшили шаг с 1500 до 700, чтобы не перепрыгивать одиночные фото
-                page.wait_for_timeout(1500)
+                page.mouse.wheel(0, SCROLL_STEP_PIXELS)
+                page.wait_for_timeout(SCROLL_WAIT_MS)
                     
                 scroll_attempts += 1
                 continue
@@ -570,7 +616,7 @@ def main():
             scroll_attempts = 0 # Сбрасываем счетчик
 
             # Визуальный разделитель для удобства чтения логов
-            logging.info("-" * 50)
+            log_debug("-" * 50)
 
             # 1. Считываем текст, чтобы понять возраст и год
             aria_label = group_checkbox.get_attribute("aria-label") or ""
@@ -584,7 +630,6 @@ def main():
             manifest_entry = get_manifest_block(manifest, block_id, aria_label, photo_date)
             block_type = get_block_type(aria_label)
             manifest_entry["block_type"] = block_type
-            legacy_skip_match = bool(photo_date and SKIP_START and SKIP_END and (SKIP_START <= photo_date <= SKIP_END))
             block_verified = bool(manifest_entry.get("files_verified"))
             date_coverage = get_verified_date_coverage(manifest, photo_date) if block_type != "group" else None
             if date_coverage and not block_verified:
@@ -596,19 +641,20 @@ def main():
             status_msg = "УДАЛЯЕМ" if should_delete else "ОСТАВЛЯЕМ В ОБЛАКЕ"
             action_msg = "СКАЧИВАЕМ" if should_download else "ПРОПУСКАЕМ СКАЧИВАНИЕ"
             
-            logging.info(f"🎯 Найдена группа: {aria_label} (Возраст: {days_old} дн. -> {action_msg}, {status_msg})")
-            
-            # Ищем год в тексте (например, "Выбрать фото за 1 мая 2024 г.")
-            if legacy_skip_match and not block_verified:
-                logging.info("⚠️ Блок попадает в старый SKIP_PERIOD, но manifest не подтверждает архив. Скачиваем заново перед возможным удалением.")
-            save_manifest(manifest)
+            log_debug(f"🎯 Найдена группа: {aria_label} (Возраст: {days_old} дн. -> {action_msg}, {status_msg})")
 
             if block_verified and not should_delete:
-                logging.info("⏩ Блок уже подтвержден manifest и остается в облаке. UI-выделение не требуется.")
+                log_debug("⏩ Блок уже подтвержден manifest и остается в облаке. UI-выделение не требуется.")
                 continue
 
             if block_verified and should_delete and (DRY_RUN_DELETE or not ALLOW_CLOUD_DELETE):
-                logging.info("🧪 Блок старше порога и уже подтвержден manifest. Dry-run: был бы удален из облака.")
+                log_info("🧪 Блок старше порога и уже подтвержден manifest. Dry-run: был бы удален из облака.")
+                continue
+
+            if block_verified and should_delete and MAX_DELETE_BLOCKS_PER_RUN and delete_blocks_this_run >= MAX_DELETE_BLOCKS_PER_RUN:
+                if not delete_limit_reached:
+                    logging.warning("⚠️ Достигнут лимит MAX_DELETE_BLOCKS_PER_RUN. Дальнейшие кандидаты на удаление будут пропущены без UI-выделения.")
+                    delete_limit_reached = True
                 continue
 
             match = re.search(r'(20\d{2})', aria_label)
@@ -665,7 +711,7 @@ def main():
             
             if should_download:
                 # 3. Скачиваем (эмуляция Shift+D)
-                logging.info("⬇️ Запрашиваем скачивание (архива или файла)...")
+                log_debug("⬇️ Запрашиваем скачивание (архива или файла)...")
                 try:
                     with page.expect_download(timeout=120000) as download_info:
                         page.keyboard.press("Shift+D")
@@ -673,7 +719,7 @@ def main():
                         
                         download_path = os.path.join(TEMP_DIR, download.suggested_filename)
                         download.save_as(download_path)
-                        logging.info(f"📥 Скачан файл: {download.suggested_filename}")
+                        log_info(f"📥 Скачан файл: {download.suggested_filename}")
                         
                         # 4. Обрабатываем и сортируем на D:\
                         zip_stats = process_downloaded_file(download_path, ui_year)
@@ -690,7 +736,7 @@ def main():
                             block_verified = True
                             manifest_entry = manifest["blocks"][block_id]
                             batch_size_str = format_size(zip_stats["size"])
-                            logging.info(f"📊 Порция: {zip_stats['processed']} файлов (новых: {zip_stats['new']}), объем: {batch_size_str}")
+                            log_info(f"📊 Порция: {zip_stats['processed']} файлов (новых: {zip_stats['new']}), объем: {batch_size_str}")
                             
                             stats["total_bytes"] += zip_stats["size"]
                             stats["new_downloaded"] += zip_stats["new"]
@@ -702,10 +748,10 @@ def main():
                             
                 except Exception as e:
                     logging.error(f"❌ Ошибка при скачивании блока: {e}")
-                    logging.info("Скрипт остановлен для безопасности.")
+                    log_run("Скрипт остановлен для безопасности.")
                     break
             else:
-                logging.info("⏩ Блок уже подтвержден в manifest. Пропускаем скачивание.")
+                log_debug("⏩ Блок уже подтвержден в manifest. Пропускаем скачивание.")
                 zip_stats["processed"] = get_verified_file_count(manifest_entry)
                 zip_stats["verified"] = True
                 zip_stats["files"] = manifest_entry.get("files", [])
@@ -726,7 +772,7 @@ def main():
                             continue
 
                         if not ALLOW_CLOUD_DELETE or DRY_RUN_DELETE:
-                            logging.info("🧪 Удаление из облака отключено настройками. Блок оставлен в Google Photos.")
+                            log_info("🧪 Удаление из облака отключено настройками. Блок оставлен в Google Photos.")
                             page.keyboard.press("Escape")
                             try:
                                 page.wait_for_selector('button[aria-label="Удалить"], button[aria-label="В корзину"]', state='hidden', timeout=3000)
@@ -735,20 +781,11 @@ def main():
                             page.wait_for_timeout(1000)
                             continue
 
-                        if MAX_DELETE_BLOCKS_PER_RUN and delete_blocks_this_run >= MAX_DELETE_BLOCKS_PER_RUN:
-                            logging.warning("⚠️ Достигнут лимит MAX_DELETE_BLOCKS_PER_RUN. Останавливаем удаление в этом запуске.")
-                            page.keyboard.press("Escape")
-                            try:
-                                page.wait_for_selector('button[aria-label="Удалить"], button[aria-label="В корзину"]', state='hidden', timeout=3000)
-                            except Exception:
-                                pass
-                            page.wait_for_timeout(1000)
-                            continue
                         # Проверяем, не снял ли Google выделение после скачивания (это происходит автоматически)
                         if should_download:
                             page.wait_for_timeout(1000)
                             if static_cb.get_attribute("aria-checked") != "true":
-                                logging.info("🔄 Восстанавливаем выделение перед удалением (Google сбросил его)...")
+                                log_debug("🔄 Восстанавливаем выделение перед удалением (Google сбросил его)...")
                                 page.bring_to_front()
                                 page.locator('body').focus()
                                 try:
@@ -759,19 +796,24 @@ def main():
                                     static_cb.evaluate("el => el.click()")
                                 page.wait_for_selector(f'div[role="checkbox"][aria-label="{safe_label}"][aria-checked="true"]', state='attached', timeout=5000)
 
-                        # 5. УДАЛЕНИЕ (только если скачивание успешно или пропущено, и возраст > DAYS_TO_KEEP)
-                        logging.info("🗑️ Удаляем фото из облака...")
+                        # 5. УДАЛЕНИЕ (только если скачивание успешно или пропущено, и возраст > DAYS_TO_KEEP_IN_CLOUD)
+                        log_info("🗑️ Удаляем фото из облака...")
                         # Кнопка корзины вверху справа
                         page.locator('button[aria-label="Удалить"]:visible, button[aria-label="В корзину"]:visible').first.click()
                         
                         # Подтверждение в модальном окне
                         page.wait_for_timeout(1000)
-                        page.locator('button:has-text("В корзину"):visible, button:has-text("Удалить"):visible').last.click()
+                        confirm_button = page.locator('div[role="dialog"] button:has-text("В корзину"):visible, div[role="dialog"] button:has-text("Удалить"):visible').last
+                        confirm_button.wait_for(timeout=10000)
+                        confirm_button.click()
+                        wait_for_delete_completion(page, safe_label)
                         
-                        logging.info("✅ Блок обработан и удален.")
+                        log_info("✅ Блок обработан и удален.")
                         stats["total_deleted"] += zip_stats["processed"] if should_download else get_verified_file_count(manifest_entry)
                         delete_blocks_this_run += 1
-                        mark_block_deleted(manifest, block_id)
+                        cascaded_deleted = mark_block_deleted(manifest, block_id)
+                        if cascaded_deleted:
+                            log_info(f"✅ В manifest каскадно отмечено дочерних item-записей: {cascaded_deleted}")
                         if photo_date:
                             stats["deleted_dates"].append(photo_date)
                     else:
@@ -780,35 +822,31 @@ def main():
                             page.wait_for_selector('button[aria-label="Удалить"], button[aria-label="В корзину"]', state='hidden', timeout=3000)
                         except Exception:
                             pass
-                        logging.info("✅ Выделение снято, переходим к следующему блоку.")
-                        
-                    # ОБНОВЛЯЕМ SKIP_PERIOD
-                    if update_skip_period(photo_date):
-                        logging.info(f"💾 Конфиг обновлен: пропущенный период теперь с {SKIP_START.strftime('%Y-%m-%d')} по {SKIP_END.strftime('%Y-%m-%d')}")
+                        log_debug("✅ Выделение снято, переходим к следующему блоку.")
                         
                     page.wait_for_timeout(2000) # Пауза перед переходом к следующей группе
                 except Exception as e:
                     logging.error(f"❌ Ошибка при удалении/снятии выделения: {e}")
-                    logging.info("Скрипт остановлен для безопасности.")
+                    log_run("Скрипт остановлен для безопасности.")
                     break
 
         # ИТОГОВЫЙ ОТЧЕТ
-        logging.info("========================================")
-        logging.info("🏁 ИТОГОВЫЙ ОТЧЕТ О РАБОТЕ СКРИПТА")
-        logging.info("========================================")
-        logging.info(f"💾 Общий объем обработанных медиафайлов: {format_size(stats['total_bytes'])}")
-        logging.info(f"📥 Новых файлов скачано: {stats['new_downloaded']}")
+        log_run("========================================")
+        log_run("🏁 ИТОГОВЫЙ ОТЧЕТ О РАБОТЕ СКРИПТА")
+        log_run("========================================")
+        log_run(f"💾 Общий объем обработанных медиафайлов: {format_size(stats['total_bytes'])}")
+        log_run(f"📥 Новых файлов скачано: {stats['new_downloaded']}")
         if stats['downloaded_dates']:
             min_d = min(stats['downloaded_dates']).strftime('%d.%m.%Y')
             max_d = max(stats['downloaded_dates']).strftime('%d.%m.%Y')
-            logging.info(f"📅 Период новых скачанных файлов: с {min_d} по {max_d}")
+            log_run(f"📅 Период новых скачанных файлов: с {min_d} по {max_d}")
             
-        logging.info(f"🗑️ Файлов удалено из облака: {stats['total_deleted']}")
+        log_run(f"🗑️ Файлов удалено из облака: {stats['total_deleted']}")
         if stats['deleted_dates']:
             min_del = min(stats['deleted_dates']).strftime('%d.%m.%Y')
             max_del = max(stats['deleted_dates']).strftime('%d.%m.%Y')
-            logging.info(f"📅 Период удаленных файлов: с {min_del} по {max_del}")
-        logging.info("========================================")
+            log_run(f"📅 Период удаленных файлов: с {min_del} по {max_del}")
+        log_run("========================================")
 
         browser.close()
 

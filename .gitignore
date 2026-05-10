@@ -10,6 +10,7 @@ app.log
 config.json
 backup_manifest.json
 backup_manifest.json.tmp
+backup_manifest.json.tmp.*
 
 .env
 .venv/
