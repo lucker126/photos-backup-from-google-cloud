@@ -1,9 +1,13 @@
 @echo off
-chcp 65001 >nul
 setlocal EnableExtensions
 title Google Photos Backup Bot
 
 cd /d "%~dp0"
+
+if /I "%~1"=="--check" (
+    echo start_bot.bat check ok
+    exit /b 0
+)
 
 echo ========================================
 echo Google Photos Backup Bot
@@ -37,41 +41,41 @@ if not errorlevel 1 (
     exit /b 0
 )
 
-echo Не найден Python 3.
-echo Установите Python с https://www.python.org/downloads/windows/
-echo При установке обязательно включите галку "Add python.exe to PATH".
+echo Python 3 was not found.
+echo Install Python from https://www.python.org/downloads/windows/
+echo During installation, enable "Add python.exe to PATH".
 exit /b 1
 
 :ensure_venv
 if exist "venv\Scripts\python.exe" (
-    echo Виртуальное окружение найдено.
+    echo Virtual environment found.
     exit /b 0
 )
 
-echo Создаю виртуальное окружение venv...
+echo Creating virtual environment: venv
 %SYSTEM_PYTHON% -m venv venv
 if errorlevel 1 (
-    echo Не удалось создать виртуальное окружение.
+    echo Failed to create virtual environment.
     exit /b 1
 )
 
-echo Виртуальное окружение создано.
+echo Virtual environment created.
 exit /b 0
 
 :install_dependencies
 echo.
-echo Проверяю и устанавливаю зависимости...
+echo Checking Python dependencies...
 "venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo Не удалось установить Python-зависимости.
+    echo Failed to install Python dependencies.
     exit /b 1
 )
 
 echo.
-echo Проверяю браузер Playwright...
+echo Checking Playwright Chromium...
 "venv\Scripts\python.exe" -m playwright install chromium
 if errorlevel 1 (
-    echo Не удалось установить браузер Playwright Chromium.
+    echo Failed to install Playwright Chromium.
     exit /b 1
 )
 
@@ -80,31 +84,31 @@ exit /b 0
 :ensure_config
 echo.
 if exist "config.json" (
-    echo config.json найден.
+    echo config.json found. Existing config will not be changed.
     exit /b 0
 )
 
-echo Первый запуск: создаю config.json из config.example.json.
+echo First run: creating config.json from config.example.json.
 copy /Y "config.example.json" "config.json" >nul
 if errorlevel 1 (
-    echo Не удалось создать config.json.
+    echo Failed to create config.json.
     exit /b 1
 )
 
 echo.
-echo Сейчас откроется config.json.
-echo Проверьте как минимум:
-echo   DEST_DIR - куда сохранять архив фото
-echo   DAYS_TO_KEEP_IN_CLOUD - сколько дней держать фото в облаке
-echo   DRY_RUN_DELETE - true для безопасного первого прогона
+echo config.json will open in Notepad now.
+echo Please check at least these settings:
+echo   DEST_DIR - where the local photo archive will be stored
+echo   DAYS_TO_KEEP_IN_CLOUD - how many days photos stay in Google Photos
+echo   DRY_RUN_DELETE - keep true for the first safe run
 echo.
-echo Закройте Блокнот после сохранения config.json.
+echo Save config.json and close Notepad when ready.
 start /wait notepad "config.json"
 
 echo.
-choice /C YN /M "Запустить бота сейчас"
+choice /C YN /M "Start the bot now"
 if errorlevel 2 (
-    echo Запуск отменен. Позже просто снова откройте start_bot.bat.
+    echo Start cancelled. Run start_bot.bat again when ready.
     exit /b 2
 )
 
@@ -112,29 +116,29 @@ exit /b 0
 
 :run_bot
 echo.
-echo Запускаю Google Photos Backup Bot...
-echo Не закрывайте это окно до завершения работы.
+echo Starting Google Photos Backup Bot...
+echo Do not close this window until the bot finishes.
 echo ----------------------------------------
 "venv\Scripts\python.exe" google_photos_bot.py
 set "BOT_EXIT_CODE=%ERRORLEVEL%"
 echo ----------------------------------------
 
 if not "%BOT_EXIT_CODE%"=="0" (
-    echo Бот завершился с кодом ошибки %BOT_EXIT_CODE%.
-    echo Подробности смотрите в app.log.
+    echo Bot finished with error code %BOT_EXIT_CODE%.
+    echo See app.log for details.
     exit /b %BOT_EXIT_CODE%
 )
 
-echo Бот завершил работу успешно.
+echo Bot finished successfully.
 exit /b 0
 
 :fail
 echo.
-echo Установка или запуск не удались.
-echo Проверьте сообщения выше и файл app.log, если он уже был создан.
+echo Setup or launch failed.
+echo Check the messages above and app.log if it already exists.
 
 :finish
 echo.
-echo Нажмите любую клавишу, чтобы закрыть окно...
+echo Press any key to close this window...
 pause >nul
 endlocal
