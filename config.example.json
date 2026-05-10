@@ -1,0 +1,14 @@
+{
+    "DEST_DIR": "D:\\",
+    "PROFILE_DIR": "bot_profile",
+    "TEMP_DIR": "temp_zip",
+    "STATE_FILE": "backup_manifest.json",
+    "DAYS_TO_KEEP_IN_CLOUD": 180,
+    "SKIP_PERIOD_START": "",
+    "SKIP_PERIOD_END": "",
+    "STOP_AT_DATE": "",
+    "HEADLESS_MODE": false,
+    "ALLOW_CLOUD_DELETE": true,
+    "DRY_RUN_DELETE": false,
+    "MAX_DELETE_BLOCKS_PER_RUN": 0
+}

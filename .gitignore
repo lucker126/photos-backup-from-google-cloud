@@ -1,0 +1,17 @@
+venv/
+bot_profile/
+temp_zip/
+__pycache__/
+*.py[cod]
+
+app.log
+*.log
+
+config.json
+backup_manifest.json
+backup_manifest.json.tmp
+
+.env
+.venv/
+.idea/
+.vscode/
