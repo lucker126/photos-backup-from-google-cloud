@@ -19,6 +19,11 @@
 - **Файл состояния (манифест):** `STATE_FILE` (по умолчанию `backup_manifest.json`).
 - **Логи:** `app.log`
 
+## Запуск и установка
+- `start_bot.bat`: Единая точка входа для Windows. При первом запуске создает `venv`, устанавливает зависимости, ставит Playwright Chromium, создает `config.json` из `config.example.json`, открывает конфиг в Блокноте и после подтверждения запускает бота.
+- На последующих запусках `start_bot.bat` проверяет окружение и сразу стартует `google_photos_bot.py` через `venv\Scripts\python.exe`.
+- Для релиза на GitHub достаточно отдавать пользователю архив проекта без локальных файлов `config.json`, `backup_manifest.json`, `app.log`, `bot_profile` и `venv`.
+
 ## Настройки (config.json)
 Скрипт автоматически создает и использует файл `config.json`:
 - `DEST_DIR`: Целевая папка для сохранения архива.
