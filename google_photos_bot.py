@@ -27,7 +27,8 @@ DEFAULT_CONFIG = {
     "MAX_DELETE_BLOCKS_PER_RUN": 1,
     "LOG_LEVEL": "WARNING",
     "SCROLL_STEP_PIXELS": 500,
-    "SCROLL_WAIT_MS": 1500
+    "SCROLL_WAIT_MS": 1500,
+    "AUTH_WAIT_TIMEOUT_MS": 300000
 }
 
 if not os.path.exists(CONFIG_FILE):
@@ -61,6 +62,7 @@ def get_int_config(name, default, minimum):
 
 SCROLL_STEP_PIXELS = get_int_config("SCROLL_STEP_PIXELS", 500, 100)
 SCROLL_WAIT_MS = get_int_config("SCROLL_WAIT_MS", 1500, 500)
+AUTH_WAIT_TIMEOUT_MS = get_int_config("AUTH_WAIT_TIMEOUT_MS", 300000, 30000)
 RUN_LEVEL = 25
 logging.addLevelName(RUN_LEVEL, "RUN")
 LOG_LEVELS = {
@@ -99,6 +101,95 @@ def log_debug(message):
 
 # Создаем временную папку, если ее нет
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+GALLERY_ITEM_SELECTOR = 'div[role="checkbox"][aria-label]:not([aria-checked="true"])'
+LOGIN_PAGE_HINTS = ("accounts.google.com", "/signin")
+
+def is_login_page(page):
+    """Проверяет, находимся ли мы на странице логина Google (по URL или по полю email)."""
+    try:
+        url = page.url or ""
+    except Exception:
+        return False
+    if any(hint in url for hint in LOGIN_PAGE_HINTS):
+        return True
+    try:
+        return page.locator('input[type="email"]').count() > 0
+    except Exception:
+        return False
+
+def detect_auth_state(page, timeout_ms=10000, poll_ms=500):
+    """Детерминированно ждет одно из состояний: 'gallery' (чекбоксы галереи) или 'login' (форма логина).
+
+    Возвращает 'gallery' или 'login', либо None, если за timeout ничего не детектировано.
+    Заменяет старую схему «сон 2 сек + одноразовый URL-чек», которая давала ложно-положительный
+    результат при истекшей сессии (редирект на accounts.google.com не успевал сработать).
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        try:
+            if page.locator(GALLERY_ITEM_SELECTOR).count() > 0:
+                return "gallery"
+        except Exception:
+            pass
+        if is_login_page(page):
+            return "login"
+        page.wait_for_timeout(poll_ms)
+    # Последний шанс: финальная проверка перед тем, как сдаться
+    try:
+        if page.locator(GALLERY_ITEM_SELECTOR).count() > 0:
+            return "gallery"
+    except Exception:
+        pass
+    if is_login_page(page):
+        return "login"
+    return None
+
+def ensure_authenticated(page, context=""):
+    """Гарантирует, что пользователь авторизован в Google Photos.
+
+    - Если галерея уже видна — возвращается сразу, без лишних ожиданий.
+    - Если обнаружена форма логина — ждет ручного входа (включая 2FA)
+      до AUTH_WAIT_TIMEOUT_MS и далее ждет появления галереи.
+    - Выбрасывает RuntimeError при таймауте — вызывающий код решает, как завершаться.
+    """
+    where = f" ({context})" if context else ""
+    state = detect_auth_state(page, timeout_ms=10000)
+
+    if state == "gallery":
+        log_debug(f"✅ Сессия валидна, галерея доступна{where}.")
+        return
+
+    if state is None:
+        # Ни галереи, ни явной формы логина — возможно медленная загрузка.
+        # Дожидаемся галереи еще немного, прежде чем считать это логином.
+        log_debug(f"⏳ Галерея не детектирована{where}, ждем еще до 10 сек...")
+        state = detect_auth_state(page, timeout_ms=10000)
+        if state == "gallery":
+            log_debug(f"✅ Галерея загрузилась{where}.")
+            return
+
+    if state != "login":
+        raise RuntimeError(f"Не удалось определить состояние авторизации{where}: ни галереи, ни формы логина.")
+
+    wait_minutes = round(AUTH_WAIT_TIMEOUT_MS / 60000, 1)
+    log_run(f"🔐 Обнаружена страница логина Google{where}. Войдите в аккаунт (есть {wait_minutes} мин.)")
+    try:
+        page.wait_for_url("https://photos.google.com/**", timeout=AUTH_WAIT_TIMEOUT_MS)
+    except Exception as e:
+        raise RuntimeError(
+            f"Таймаут ожидания входа ({AUTH_WAIT_TIMEOUT_MS} мс){where}. "
+            "Авторизация не завершена — увеличьте AUTH_WAIT_TIMEOUT_MS в config.json или войдите быстрее."
+        ) from e
+    log_run("✅ Авторизация пройдена!")
+
+    # После редиректа обратно в photos.google.com даем галерее отрендериться
+    post_state = detect_auth_state(page, timeout_ms=20000)
+    if post_state == "login":
+        raise RuntimeError(f"После входа снова обнаружена страница логина{where}. Сессия не установилась.")
+    if post_state != "gallery":
+        raise RuntimeError(f"После входа галерея не загрузилась{where} (таймаут 20 сек).")
+    log_debug("✅ Галерея загружена, продолжаем работу.")
 
 def now_iso():
     return datetime.now().replace(microsecond=0).isoformat()
@@ -512,25 +603,17 @@ def main():
         
         page = browser.new_page()
         page.goto("https://photos.google.com/")
-        
-        # Ждем немного, чтобы браузер успел сделать редирект, если сессии нет
-        page.wait_for_timeout(2000)
-        
-        if "accounts.google.com" in page.url or "signin" in page.url:
-            log_debug("⏳ Требуется авторизация... (Авторизуйтесь, у вас есть 5 минут)")
-            page.wait_for_url("https://photos.google.com/**", timeout=300000)
-            log_debug("✅ Авторизация пройдена!")
-            page.wait_for_timeout(3000) # Даем интерфейсу загрузиться
-            
-        log_debug("🔍 Поиск фотографий в галерее...")
+
+        # Детерминированная проверка авторизации: race между формой логина и галереей.
+        # При истекшей сессии ждет ручного входа до AUTH_WAIT_TIMEOUT_MS (вкл. 2FA).
+        log_debug("🔍 Проверка авторизации и загрузки галереи...")
         try:
-            # Ждем появления чекбоксов. state='attached' найдет их, даже если они визуально скрыты без наведения
-            page.wait_for_selector('div[role="checkbox"][aria-label]:not([aria-checked="true"])', state='attached', timeout=15000)
-            log_debug("✅ Галерея загружена, начинаем работу.")
-        except Exception:
-            log_run("🏁 Фотографии не найдены. Галерея пуста либо скрипт дошел до конца. Завершаем работу.")
+            ensure_authenticated(page, context="запуск")
+        except RuntimeError as e:
+            logging.error(f"❌ {e}")
             browser.close()
             return
+        log_debug("✅ Галерея загружена, начинаем работу.")
         
         # Основной цикл обработки блоков (групп фото по датам)
         processed_labels = set()
@@ -554,10 +637,33 @@ def main():
             try:
                 # Явно дожидаемся появления хотя бы одной невыделенной галочки
                 # Таймаут 15 секунд для перехода между группами
-                page.wait_for_selector('div[role="checkbox"][aria-label]:not([aria-checked="true"])', state='attached', timeout=15000)
+                page.wait_for_selector(GALLERY_ITEM_SELECTOR, state='attached', timeout=15000)
             except Exception:
+                # Прежде чем решить, что галерея пуста/закончилась, проверяем,
+                # не выкинуло ли нас на страницу логина (сессия могла истечь посреди рана)
+                if is_login_page(page):
+                    logging.warning("⚠️ Сессия Google истекла посреди работы. Требуется повторный вход.")
+                    try:
+                        ensure_authenticated(page, context="повторный вход")
+                        log_info("✅ Повторный вход выполнен, продолжаем с того же места.")
+                        continue
+                    except RuntimeError as e:
+                        logging.error(f"❌ {e}")
+                        break
                 log_debug("🏁 Больше не найдено групп фотографий (или истекло время ожидания). Скрипт завершает работу.")
                 break
+
+            # Редирект на логин может произойти и без таймаута селектора
+            # (например, чекбоксы успели найтись на умирающей странице)
+            if is_login_page(page):
+                logging.warning("⚠️ Обнаружен редирект на страницу логина. Требуется повторный вход.")
+                try:
+                    ensure_authenticated(page, context="повторный вход")
+                    log_info("✅ Повторный вход выполнен, продолжаем с того же места.")
+                    continue
+                except RuntimeError as e:
+                    logging.error(f"❌ {e}")
+                    break
 
             # Находим галочки, которые мы еще не обрабатывали в этом сеансе
             checkboxes = page.locator('div[role="checkbox"][aria-label]:not([aria-checked="true"])').all()

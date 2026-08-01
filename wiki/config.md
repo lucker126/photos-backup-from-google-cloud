@@ -19,6 +19,7 @@
 | `LOG_LEVEL` | string | `"WARNING"` | Уровень логов в `app.log` (`DEBUG`/`INFO`/`WARNING`/`ERROR`) |
 | `SCROLL_STEP_PIXELS` | int | `500` | Шаг прокрутки галереи в пикселях |
 | `SCROLL_WAIT_MS` | int | `1500` | Пауза после прокрутки (мс), чтобы React успел отрендерить |
+| `AUTH_WAIT_TIMEOUT_MS` | int | `300000` | Сколько ждать ручного входа/2FA (мс) при обнаружении формы логина — на старте и при истечении сессии посреди рана. Минимум 30000 |
 
 ## Alias-ключи
 
@@ -39,6 +40,7 @@
 | `LOG_LEVEL` | `log_level` |
 | `SCROLL_STEP_PIXELS` | `scroll_step_pixels` |
 | `SCROLL_WAIT_MS` | `scroll_wait_ms` |
+| `AUTH_WAIT_TIMEOUT_MS` | `auth_wait_timeout_ms` |
 
 При чтении значение из любого alias'а имеет приоритет над дефолтом.
 
@@ -58,7 +60,8 @@
     "MAX_DELETE_BLOCKS_PER_RUN": 1,
     "LOG_LEVEL": "WARNING",
     "SCROLL_STEP_PIXELS": 500,
-    "SCROLL_WAIT_MS": 1500
+    "SCROLL_WAIT_MS": 1500,
+    "AUTH_WAIT_TIMEOUT_MS": 300000
 }
 ```
 
