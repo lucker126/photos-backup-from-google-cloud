@@ -381,12 +381,78 @@ def mark_block_deleted(manifest, block_id):
 
 def wait_for_delete_completion(page, safe_label):
     block_selector = f'div[role="checkbox"][aria-label="{safe_label}"]'
-    page.wait_for_selector('div[role="dialog"]:visible', state='hidden', timeout=15000)
     try:
         page.wait_for_selector(block_selector, state='detached', timeout=15000)
     except Exception as e:
         if page.locator(block_selector).count() > 0:
             raise RuntimeError("Google Photos did not remove the selected block after delete confirmation") from e
+
+def confirm_delete_if_required(page):
+    """Confirm a Google Photos trash dialog, if the current UI shows one."""
+    dialog = page.locator('div[role="dialog"]:visible').last
+    try:
+        dialog.wait_for(state="visible", timeout=3000)
+    except Exception:
+        log_debug("Google Photos переместил выбранные файлы в корзину без диалога подтверждения.")
+        return False
+
+    # Read the live dialog instead of waiting for one particular translation.
+    # Google Photos changes both the wording and the element type (button vs
+    # div[role=button]).  The primary action is normally the last non-cancel
+    # control in the dialog.
+    dialog_buttons = dialog.locator('button:visible, [role="button"]:visible')
+    button_details = dialog_buttons.evaluate_all("""
+        buttons => buttons.map((button, index) => ({
+            index,
+            text: (button.innerText || '').trim(),
+            ariaLabel: button.getAttribute('aria-label') || '',
+            title: button.getAttribute('title') || '',
+            action: button.getAttribute('data-mdc-dialog-action') || '',
+            disabled: Boolean(button.disabled || button.getAttribute('aria-disabled') === 'true')
+        }))
+    """)
+    if not button_details:
+        raise RuntimeError("Google Photos showed a delete dialog without visible controls")
+
+    def button_name(details):
+        return " ".join((details["text"], details["ariaLabel"], details["title"])).casefold()
+
+    non_cancel_buttons = [
+        details for details in button_details
+        if not details["disabled"] and button_name(details) not in {"отмена", "cancel"}
+    ]
+    if not non_cancel_buttons:
+        raise RuntimeError(f"Delete dialog has no enabled confirmation button: {button_details}")
+
+    name_matches = ("корзин", "удал", "перемест", "trash", "delete", "move")
+    confirm_details = next(
+        (details for details in reversed(non_cancel_buttons) if any(match in button_name(details) for match in name_matches)),
+        non_cancel_buttons[-1],
+    )
+    log_debug(f"Подтверждаем удаление кнопкой из диалога: {confirm_details}")
+    confirm_button = dialog_buttons.nth(confirm_details["index"])
+    try:
+        confirm_button.click(timeout=5000)
+    except Exception:
+        # The dialog can be re-rendered while Playwright is clicking it.  The
+        # project uses this direct-DOM fallback for other transient Photos UI.
+        confirm_button.evaluate("button => button.click()")
+
+    try:
+        dialog.wait_for(state="hidden", timeout=3000)
+    except Exception:
+        # Re-read the live button and issue the documented DOM fallback once
+        # more before declaring deletion unsuccessful.
+        confirm_button.evaluate("button => button.click()")
+        try:
+            dialog.wait_for(state="hidden", timeout=10000)
+        except Exception as e:
+            raise RuntimeError(
+                f"Delete dialog did not close after clicking {confirm_details}; "
+                f"visible controls: {button_details}"
+            ) from e
+
+    return True
 
 def get_verified_file_count(entry):
     files = entry.get("files") or []
@@ -907,11 +973,9 @@ def main():
                         # Кнопка корзины вверху справа
                         page.locator('button[aria-label="Удалить"]:visible, button[aria-label="В корзину"]:visible').first.click()
                         
-                        # Подтверждение в модальном окне
-                        page.wait_for_timeout(1000)
-                        confirm_button = page.locator('div[role="dialog"] button:has-text("В корзину"):visible, div[role="dialog"] button:has-text("Удалить"):visible').last
-                        confirm_button.wait_for(timeout=10000)
-                        confirm_button.click()
+                        # В старом интерфейсе Google Photos здесь появляется диалог,
+                        # а в новом файлы сразу перемещаются в корзину.
+                        confirm_delete_if_required(page)
                         wait_for_delete_completion(page, safe_label)
                         
                         log_info("✅ Блок обработан и удален.")
