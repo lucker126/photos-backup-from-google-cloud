@@ -94,25 +94,18 @@ download_path = download_block_with_retry(
 
 ## Удаление
 
-### JS evaluate для выбора и удаления
+### Механика удаления и подтверждения
 
-```python
-page.evaluate('''
-    const checkboxes = document.querySelectorAll('[role="checkbox"][aria-label]');
-    for (const cb of checkboxes) {
-        if (cb.getAttribute('aria-label').includes('Искомая дата')) {
-            cb.click();
-        }
-    }
-''')
-# Затем: клик по кнопке корзины в toolbar
-```
-
-### Почему JS, не Playwright click
-
-- Toolbar Google Photos динамически появляется/исчезает
-- Playwright `wait_for_selector` иногда не успевает
-- JS evaluate работает напрямую с актуальным DOM
+1. Проверяется состояние `aria-checked` чекбокса блока. Если Google снял выделение, вызывается `select_block_checkbox`.
+2. Нажимается кнопка корзины в тулбаре (`page.locator('button[aria-label="Удалить"], button[aria-label="В корзину"]')`) с fallback через `evaluate("btn => btn.click()")`.
+3. Вызывается `confirm_delete_if_required`:
+   - Динамически считывает диалог `div[role="dialog"]`.
+   - Ищет действие подтверждения (кнопки с текстом «В корзину», «Удалить», «Переместить», «Move», «Delete», «Trash»).
+   - Нажимает подтверждение и ожидает скрытия окна.
+4. Вызывается `wait_for_delete_completion`:
+   - Опрашивает DOM с шагом 500 мс (до 30 с) до исчезновения чекбокса из DOM.
+   - Если диалог появился с задержкой уже в процессе ожидания — повторно перехватывает и подтверждает его.
+   - При сбое сохраняет отладочный скриншот `delete_error.png`.
 
 ## Логирование UI-событий
 

@@ -384,19 +384,39 @@ def mark_block_deleted(manifest, block_id):
         raise RuntimeError("Cloud delete succeeded, but manifest could not be saved")
     return cascaded_count
 
-def wait_for_delete_completion(page, safe_label):
+def wait_for_delete_completion(page, safe_label, timeout_ms=30000):
     block_selector = f'div[role="checkbox"][aria-label="{safe_label}"]'
-    try:
-        page.wait_for_selector(block_selector, state='detached', timeout=15000)
-    except Exception as e:
-        if page.locator(block_selector).count() > 0:
-            raise RuntimeError("Google Photos did not remove the selected block after delete confirmation") from e
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        # Если появился диалог подтверждения удаления, подтверждаем его
+        try:
+            if page.locator('div[role="dialog"]:visible').count() > 0:
+                log_debug("Обнаружен открытый диалог подтверждения в процессе ожидания удаления...")
+                confirm_delete_if_required(page, timeout_ms=2000)
+        except Exception as e:
+            log_debug(f"Попытка подтверждения диалога в цикле ожидания: {e}")
 
-def confirm_delete_if_required(page):
+        # Проверяем, исчез ли блок из DOM
+        try:
+            if page.locator(block_selector).count() == 0:
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
+    if page.locator(block_selector).count() > 0:
+        try:
+            page.screenshot(path=os.path.join(BASE_DIR, "delete_error.png"))
+        except Exception:
+            pass
+        raise RuntimeError("Google Photos did not remove the selected block after delete confirmation")
+    return True
+
+def confirm_delete_if_required(page, timeout_ms=5000):
     """Confirm a Google Photos trash dialog, if the current UI shows one."""
     dialog = page.locator('div[role="dialog"]:visible').last
     try:
-        dialog.wait_for(state="visible", timeout=3000)
+        dialog.wait_for(state="visible", timeout=timeout_ms)
     except Exception:
         log_debug("Google Photos переместил выбранные файлы в корзину без диалога подтверждения.")
         return False
@@ -444,7 +464,7 @@ def confirm_delete_if_required(page):
         confirm_button.evaluate("button => button.click()")
 
     try:
-        dialog.wait_for(state="hidden", timeout=3000)
+        dialog.wait_for(state="hidden", timeout=5000)
     except Exception:
         # Re-read the live button and issue the documented DOM fallback once
         # more before declaring deletion unsuccessful.
@@ -1063,20 +1083,24 @@ def main():
                             page.wait_for_timeout(1000)
                             continue
 
-                        # Проверяем, не снял ли Google выделение после скачивания (это происходит автоматически)
-                        if should_download:
-                            page.wait_for_timeout(1000)
-                            if static_cb.get_attribute("aria-checked") != "true":
-                                log_debug("🔄 Восстанавливаем выделение перед удалением (Google сбросил его)...")
-                                if not select_block_checkbox(page, static_cb, safe_label, max_attempts=3):
-                                    logging.error("❌ Не удалось восстановить выделение перед удалением. Удаление отменено.")
-                                    page.keyboard.press("Escape")
-                                    continue
+                        # Проверяем, что блок действительно выделен перед удалением
+                        page.wait_for_timeout(500)
+                        if static_cb.get_attribute("aria-checked") != "true":
+                            log_debug("🔄 Восстанавливаем выделение перед удалением...")
+                            if not select_block_checkbox(page, static_cb, safe_label, max_attempts=3):
+                                logging.error("❌ Не удалось восстановить выделение перед удалением. Удаление отменено.")
+                                page.keyboard.press("Escape")
+                                continue
 
                         # 5. УДАЛЕНИЕ (только если скачивание успешно или пропущено, и возраст > DAYS_TO_KEEP_IN_CLOUD)
                         log_info("🗑️ Удаляем фото из облака...")
                         # Кнопка корзины вверху справа
-                        page.locator('button[aria-label="Удалить"]:visible, button[aria-label="В корзину"]:visible').first.click()
+                        trash_btn = page.locator('button[aria-label="Удалить"]:visible, button[aria-label="В корзину"]:visible').first
+                        try:
+                            trash_btn.wait_for(state="visible", timeout=5000)
+                            trash_btn.click(timeout=5000)
+                        except Exception:
+                            trash_btn.evaluate("btn => btn.click()")
                         
                         # В старом интерфейсе Google Photos здесь появляется диалог,
                         # а в новом файлы сразу перемещаются в корзину.

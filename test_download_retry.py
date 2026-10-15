@@ -232,6 +232,44 @@ class TestDownloadRetryAndConfig(unittest.TestCase):
                 max_retries=3
             )
 
+    def test_wait_for_delete_completion_detached_immediately(self):
+        page = MagicMock()
+        # count() is 0 (already detached)
+        page.locator.return_value.count.return_value = 0
+        result = bot.wait_for_delete_completion(page, "2026-05-10", timeout_ms=500)
+        self.assertTrue(result)
+
+    def test_wait_for_delete_completion_confirms_delayed_dialog(self):
+        page = MagicMock()
+        state = {"dialog_visible": True, "block_count": 1}
+
+        def fake_locator(selector):
+            loc = MagicMock()
+            if "dialog" in selector:
+                loc.count.side_effect = lambda: 1 if state["dialog_visible"] else 0
+            else:
+                loc.count.side_effect = lambda: state["block_count"]
+            return loc
+
+        page.locator.side_effect = fake_locator
+
+        def fake_confirm(p, timeout_ms=2000):
+            state["dialog_visible"] = False
+            state["block_count"] = 0
+            return True
+
+        with patch("google_photos_bot.confirm_delete_if_required", side_effect=fake_confirm) as mock_confirm:
+            result = bot.wait_for_delete_completion(page, "2026-05-10", timeout_ms=2000)
+            self.assertTrue(result)
+            mock_confirm.assert_called_once()
+
+    def test_wait_for_delete_completion_timeout_raises(self):
+        page = MagicMock()
+        # Always visible (count = 1)
+        page.locator.return_value.count.return_value = 1
+        with self.assertRaisesRegex(RuntimeError, "Google Photos did not remove"):
+            bot.wait_for_delete_completion(page, "2026-05-10", timeout_ms=100)
+
 
 if __name__ == "__main__":
     unittest.main()
