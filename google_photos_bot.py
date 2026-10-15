@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import shutil
 import zipfile
@@ -33,28 +34,31 @@ DEFAULT_CONFIG = {
     "DOWNLOAD_MAX_RETRIES": 3
 }
 
-if not os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(DEFAULT_CONFIG, f, indent=4, ensure_ascii=False)
-    config = DEFAULT_CONFIG
-else:
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        config = json.load(f)
+config = {}
+DEST_DIR = "D:\\"
+PROFILE_DIR = os.path.join(BASE_DIR, "bot_profile")
+TEMP_DIR = os.path.join(BASE_DIR, "temp_zip")
+STATE_FILE = os.path.join(BASE_DIR, "backup_manifest.json")
+DAYS_TO_KEEP = 180
+HEADLESS_MODE = False
+ALLOW_CLOUD_DELETE = True
+DRY_RUN_DELETE = False
+MAX_DELETE_BLOCKS_PER_RUN = 0
+LOG_LEVEL_NAME = "WARNING"
+RUN_LEVEL = 25
+logging.addLevelName(RUN_LEVEL, "RUN")
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": RUN_LEVEL,
+}
+LOG_LEVEL = RUN_LEVEL
 
-DEST_DIR = config.get("DEST_DIR", "D:\\")
-PROFILE_DIR = config.get("PROFILE_DIR", "bot_profile")
-if not os.path.isabs(PROFILE_DIR): PROFILE_DIR = os.path.join(BASE_DIR, PROFILE_DIR)
-TEMP_DIR = config.get("TEMP_DIR", "temp_zip")
-if not os.path.isabs(TEMP_DIR): TEMP_DIR = os.path.join(BASE_DIR, TEMP_DIR)
-STATE_FILE = config.get("STATE_FILE", "backup_manifest.json")
-if not os.path.isabs(STATE_FILE): STATE_FILE = os.path.join(BASE_DIR, STATE_FILE)
-
-DAYS_TO_KEEP = config.get("DAYS_TO_KEEP_IN_CLOUD", 180)
-HEADLESS_MODE = config.get("HEADLESS_MODE", False)
-ALLOW_CLOUD_DELETE = config.get("ALLOW_CLOUD_DELETE", True)
-DRY_RUN_DELETE = config.get("DRY_RUN_DELETE", False)
-MAX_DELETE_BLOCKS_PER_RUN = config.get("MAX_DELETE_BLOCKS_PER_RUN", 0)
-LOG_LEVEL_NAME = str(config.get("LOG_LEVEL", "WARNING")).upper()
+def parse_date(date_str):
+    if date_str:
+        try: return datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError: pass
+    return None
 
 def get_int_config(name, default, minimum):
     try:
@@ -63,37 +67,76 @@ def get_int_config(name, default, minimum):
     except (TypeError, ValueError):
         return default
 
-SCROLL_STEP_PIXELS = get_int_config("SCROLL_STEP_PIXELS", 500, 100)
-SCROLL_WAIT_MS = get_int_config("SCROLL_WAIT_MS", 1500, 500)
-AUTH_WAIT_TIMEOUT_MS = get_int_config("AUTH_WAIT_TIMEOUT_MS", 300000, 30000)
-DOWNLOAD_TIMEOUT_MS = get_int_config("DOWNLOAD_TIMEOUT_MS", 120000, 10000)
-DOWNLOAD_MAX_RETRIES = get_int_config("DOWNLOAD_MAX_RETRIES", 3, 1)
-RUN_LEVEL = 25
-logging.addLevelName(RUN_LEVEL, "RUN")
-LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": RUN_LEVEL,
-}
-LOG_LEVEL = LOG_LEVELS.get(LOG_LEVEL_NAME, RUN_LEVEL)
+SCROLL_STEP_PIXELS = 500
+SCROLL_WAIT_MS = 1500
+AUTH_WAIT_TIMEOUT_MS = 300000
+DOWNLOAD_TIMEOUT_MS = 120000
+DOWNLOAD_MAX_RETRIES = 3
+STOP_AT = None
 
-def parse_date(date_str):
-    if date_str:
-        try: return datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError: pass
-    return None
+def reload_config():
+    global config, DEST_DIR, PROFILE_DIR, TEMP_DIR, STATE_FILE
+    global DAYS_TO_KEEP, HEADLESS_MODE, ALLOW_CLOUD_DELETE, DRY_RUN_DELETE
+    global MAX_DELETE_BLOCKS_PER_RUN, LOG_LEVEL_NAME, LOG_LEVEL, STOP_AT
+    global SCROLL_STEP_PIXELS, SCROLL_WAIT_MS, AUTH_WAIT_TIMEOUT_MS
+    global DOWNLOAD_TIMEOUT_MS, DOWNLOAD_MAX_RETRIES
 
-STOP_AT = parse_date(config.get("STOP_AT_DATE"))
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4, ensure_ascii=False)
+        cfg_loaded = DEFAULT_CONFIG.copy()
+    else:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg_loaded = json.load(f)
+
+    config.clear()
+    config.update(cfg_loaded)
+
+    DEST_DIR = config.get("DEST_DIR", "D:\\")
+    PROFILE_DIR = config.get("PROFILE_DIR", "bot_profile")
+    if not os.path.isabs(PROFILE_DIR): PROFILE_DIR = os.path.join(BASE_DIR, PROFILE_DIR)
+    TEMP_DIR = config.get("TEMP_DIR", "temp_zip")
+    if not os.path.isabs(TEMP_DIR): TEMP_DIR = os.path.join(BASE_DIR, TEMP_DIR)
+    STATE_FILE = config.get("STATE_FILE", "backup_manifest.json")
+    if not os.path.isabs(STATE_FILE): STATE_FILE = os.path.join(BASE_DIR, STATE_FILE)
+
+    DAYS_TO_KEEP = config.get("DAYS_TO_KEEP_IN_CLOUD", 180)
+    HEADLESS_MODE = config.get("HEADLESS_MODE", False)
+    ALLOW_CLOUD_DELETE = config.get("ALLOW_CLOUD_DELETE", True)
+    DRY_RUN_DELETE = config.get("DRY_RUN_DELETE", False)
+    MAX_DELETE_BLOCKS_PER_RUN = config.get("MAX_DELETE_BLOCKS_PER_RUN", 0)
+    LOG_LEVEL_NAME = str(config.get("LOG_LEVEL", "WARNING")).upper()
+    LOG_LEVEL = LOG_LEVELS.get(LOG_LEVEL_NAME, RUN_LEVEL)
+    logging.getLogger().setLevel(LOG_LEVEL)
+
+    SCROLL_STEP_PIXELS = get_int_config("SCROLL_STEP_PIXELS", 500, 100)
+    SCROLL_WAIT_MS = get_int_config("SCROLL_WAIT_MS", 1500, 500)
+    AUTH_WAIT_TIMEOUT_MS = get_int_config("AUTH_WAIT_TIMEOUT_MS", 300000, 30000)
+    DOWNLOAD_TIMEOUT_MS = get_int_config("DOWNLOAD_TIMEOUT_MS", 120000, 10000)
+    DOWNLOAD_MAX_RETRIES = get_int_config("DOWNLOAD_MAX_RETRIES", 3, 1)
+    STOP_AT = parse_date(config.get("STOP_AT_DATE"))
+    ensure_file_logging()
+
+def ensure_file_logging():
+    root = logging.getLogger()
+    log_file = os.path.abspath(os.path.join(BASE_DIR, "app.log"))
+    has_file = any(
+        isinstance(h, logging.FileHandler) and os.path.abspath(getattr(h, "baseFilename", "")) == log_file
+        for h in root.handlers
+    )
+    if not has_file:
+        try:
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            root.addHandler(fh)
+        except Exception:
+            pass
+
+reload_config()
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(BASE_DIR, "app.log"), encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+ensure_file_logging()
 
 def log_run(message):
     logging.log(RUN_LEVEL, message)
@@ -811,7 +854,8 @@ def process_downloaded_file(download_path, ui_fallback_year):
         "files": file_records
     }
 
-def main():
+def run(stop_event=None):
+    reload_config()
     with sync_playwright() as p:
         log_run("🌐 Запуск Google Photos backup bot")
         # Запускаем браузер с сохранением сессии (куки, логин)
@@ -824,7 +868,6 @@ def main():
             args=["--disable-blink-features=AutomationControlled", "--window-size=1920,1080"],
             ignore_default_args=["--enable-automation"]
         )
-        
         page = browser.new_page()
         page.goto("https://photos.google.com/")
 
@@ -836,7 +879,7 @@ def main():
         except RuntimeError as e:
             logging.error(f"❌ {e}")
             browser.close()
-            return
+            raise RuntimeError(f"Ошибка авторизации: {e}") from e
         log_debug("✅ Галерея загружена, начинаем работу.")
         
         # Основной цикл обработки блоков (групп фото по датам)
@@ -858,6 +901,9 @@ def main():
         delete_limit_reached = False
         
         while True:
+            if stop_event and stop_event.is_set():
+                log_run("🛑 Работа бота остановлена по запросу пользователя.")
+                break
             try:
                 # Явно дожидаемся появления хотя бы одной невыделенной галочки
                 # Таймаут 15 секунд для перехода между группами
@@ -922,6 +968,9 @@ def main():
                 break
                 
             if not group_checkbox:
+                if stop_event and stop_event.is_set():
+                    log_run("🛑 Работа бота остановлена по запросу пользователя.")
+                    break
                 if scroll_attempts > 30:
                     log_debug("🏁 Достигнут конец галереи или зависла прокрутка. Завершаем работу.")
                     break
@@ -1123,6 +1172,9 @@ def main():
                             pass
                         log_debug("✅ Выделение снято, переходим к следующему блоку.")
                         
+                    if stop_event and stop_event.is_set():
+                        log_run("🛑 Работа бота остановлена по запросу пользователя.")
+                        break
                     page.wait_for_timeout(2000) # Пауза перед переходом к следующей группе
                 except Exception as e:
                     logging.error(f"❌ Ошибка при удалении/снятии выделения: {e}")
@@ -1148,6 +1200,15 @@ def main():
         log_run("========================================")
 
         browser.close()
+        return stats
+
+def main():
+    try:
+        return run()
+    except Exception as e:
+        logging.error(f"❌ Фатальная ошибка: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
+

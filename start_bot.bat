@@ -20,7 +20,7 @@ call :install_dependencies || goto fail
 call :ensure_config
 if errorlevel 2 goto finish
 if errorlevel 1 goto fail
-call :run_bot
+call :choose_and_run
 goto finish
 
 :find_python
@@ -114,9 +114,32 @@ if errorlevel 2 (
 
 exit /b 0
 
-:run_bot
+:choose_and_run
 echo.
-echo Starting Google Photos Backup Bot...
+echo ========================================
+echo Select launch mode:
+echo   [1] Graphical Interface (GUI) - Recommended
+echo   [2] Console Mode (CLI)
+echo ========================================
+choice /C 12 /N /D 1 /T 10 /M "Choose mode [1/2] (Default in 10s is GUI: 1): "
+if errorlevel 2 goto run_cli
+goto run_gui
+
+:run_gui
+echo.
+echo Starting Graphical User Interface (GUI)...
+"venv\Scripts\python.exe" gui_app.py
+set "BOT_EXIT_CODE=%ERRORLEVEL%"
+if not "%BOT_EXIT_CODE%"=="0" (
+    echo GUI closed with code %BOT_EXIT_CODE%.
+    exit /b %BOT_EXIT_CODE%
+)
+echo Application closed.
+exit /b 0
+
+:run_cli
+echo.
+echo Starting Google Photos Backup Bot in Console Mode...
 echo Do not close this window until the bot finishes.
 echo ----------------------------------------
 "venv\Scripts\python.exe" google_photos_bot.py

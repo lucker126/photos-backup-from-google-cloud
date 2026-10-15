@@ -14,6 +14,7 @@
 ### Архитектура
 - [[architecture]] — общая архитектура и поток данных
 - [[components]] — компоненты проекта и их ответственность
+- [[gui]] — графический интерфейс (CustomTkinter)
 - [[config]] — все настройки `config.json`
 - [[manifest-schema]] — схема `backup_manifest.json`
 
