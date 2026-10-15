@@ -51,3 +51,4 @@
 | Конфиг | `config.json` → `config.example.json` |
 | Состояние | `backup_manifest.json` |
 | Логи | `app.log` |
+| Концепции GUI | `GUI_PROPOSALS.md` |

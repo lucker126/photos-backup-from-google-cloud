@@ -55,23 +55,26 @@ while not stop_condition:
 
 ### 5. Обработка блока
 ```
-google_photos_select_and_download_block(checkbox, block_id)
-  → клик (3 попытки + JS fallback)
-  → Shift+D (скачивание)
-  → _parse_additional_metadata() → count
-  → expect_download(timeout=120s)
+select_block_checkbox(checkbox, safe_label)
+  → клик (3 попытки + JS fallback, проверка aria-checked)
+download_block_with_retry(static_cb, safe_label, timeout_ms, max_retries)
+  → проверка сессии Google (ensure_authenticated при необходимости)
+  → фокус body + Shift+D (скачивание)
+  → expect_download(timeout=DOWNLOAD_TIMEOUT_MS)
+  → при таймауте / сбое / 0-байт файле: re-click + повтор до DOWNLOAD_MAX_RETRIES
   → save ZIP → TEMP_DIR
-  → handle_download_and_verify(zip_path, block_id, block_date)
-    → extractall(TEMP_DIR)
-    → для каждого файла:
-      → correct_file_date() → EXIF/имя → year
-      → копирование в DEST_DIR/Фото Google YYYY/
-      → recursive dedup (проверка по sha256 в других годах)
-      → get_file_hash() → сверка
-    → записать в manifest
-    → удалить ZIP
-  → если files_verified и старше DAYS_TO_KEEP_IN_CLOUD:
-    → select_and_delete_group() → удаление из облака
+process_downloaded_file(zip_path, ui_year)
+  → extractall(TEMP_DIR)
+  → для каждого файла:
+    → get_year_from_file() → EXIF/имя → year
+    → копирование в DEST_DIR/Фото Google YYYY/
+    → дедупликация по SHA-256
+    → sha256_file() → сверка
+  → записать в manifest (mark_block_verified)
+  → удалить ZIP
+→ если block_verified и старше DAYS_TO_KEEP_IN_CLOUD:
+  → восстановление выделения через select_block_checkbox()
+  → confirm_delete_if_required() → удаление из облака
 ```
 
 ### 6. Завершение
@@ -82,7 +85,7 @@ google_photos_select_and_download_block(checkbox, block_id)
 
 | Ошибка | Реакция |
 |--------|---------|
-| Таймаут `expect_download` | Лог ERROR, блок пропускается, manifest не обновляется |
+| Таймаут `expect_download` | До `DOWNLOAD_MAX_RETRIES` попыток с re-click; при исчерпании — WARNING/ERROR в лог, запись `mark_block_error` в manifest, безопасная остановка |
 | Browser crash | `try/except` вокруг всего цикла, trace в лог, выход |
 | Нет checkbox'ей 5 скроллов | Считаем конец галереи, выходим из цикла |
 | `partial=true` | Блок помечается, файлы с ошибками перечисляются |

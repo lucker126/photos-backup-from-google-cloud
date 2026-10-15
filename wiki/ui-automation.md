@@ -69,26 +69,28 @@ for attempt in range(3):
 
 ## Скачивание
 
-### Shift+D механика
+### Shift+D механика и Retry
 
 ```python
-page.keyboard.down('Shift')
-page.keyboard.press('KeyD')
-page.keyboard.up('Shift')
+download_path = download_block_with_retry(
+    page=page,
+    static_cb=static_cb,
+    safe_label=safe_label,
+    temp_dir=TEMP_DIR,
+    timeout_ms=DOWNLOAD_TIMEOUT_MS,
+    max_retries=DOWNLOAD_MAX_RETRIES
+)
 ```
 
-- Выбранные элементы отправляются в ZIP Google Takeout-like
-- Playwright перехватывает скачивание через `page.expect_download()`
-
-### Таймаут 120 секунд
-
-```python
-with page.expect_download(timeout=120000) as download_info:
-    ...
-download = download_info.value
-```
-
-⚠️ **Известная проблема:** иногда download не начинается → таймаут. См. [[known-issues]].
+- Выбранные элементы скачиваются по шорткату `Shift+D`
+- Playwright перехватывает скачивание через `page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS)`
+- При возникновении таймаута или ошибки:
+  1. Проверяется сессия Google (если произошел разлогин mid-run — вызывается `ensure_authenticated`)
+  2. Восстанавливается фокус окна и body
+  3. Делается re-click чекбокса (`select_block_checkbox` со снятием и повторным выставлением галочки)
+  4. Повторяется нажатие `Shift+D` в пределах `DOWNLOAD_MAX_RETRIES` (дефолт 3)
+- Если Google отдает 0-байтовый файл, он удаляется, и инициируется повторная попытка.
+- Таймаут по умолчанию 120 с (`DOWNLOAD_TIMEOUT_MS: 120000`), настраивается в `config.json`.
 
 ## Удаление
 

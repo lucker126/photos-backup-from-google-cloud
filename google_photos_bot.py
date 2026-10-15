@@ -28,7 +28,9 @@ DEFAULT_CONFIG = {
     "LOG_LEVEL": "WARNING",
     "SCROLL_STEP_PIXELS": 500,
     "SCROLL_WAIT_MS": 1500,
-    "AUTH_WAIT_TIMEOUT_MS": 300000
+    "AUTH_WAIT_TIMEOUT_MS": 300000,
+    "DOWNLOAD_TIMEOUT_MS": 120000,
+    "DOWNLOAD_MAX_RETRIES": 3
 }
 
 if not os.path.exists(CONFIG_FILE):
@@ -56,13 +58,16 @@ LOG_LEVEL_NAME = str(config.get("LOG_LEVEL", "WARNING")).upper()
 
 def get_int_config(name, default, minimum):
     try:
-        return max(minimum, int(config.get(name, default)))
+        val = config.get(name, config.get(name.lower(), default))
+        return max(minimum, int(val))
     except (TypeError, ValueError):
         return default
 
 SCROLL_STEP_PIXELS = get_int_config("SCROLL_STEP_PIXELS", 500, 100)
 SCROLL_WAIT_MS = get_int_config("SCROLL_WAIT_MS", 1500, 500)
 AUTH_WAIT_TIMEOUT_MS = get_int_config("AUTH_WAIT_TIMEOUT_MS", 300000, 30000)
+DOWNLOAD_TIMEOUT_MS = get_int_config("DOWNLOAD_TIMEOUT_MS", 120000, 10000)
+DOWNLOAD_MAX_RETRIES = get_int_config("DOWNLOAD_MAX_RETRIES", 3, 1)
 RUN_LEVEL = 25
 logging.addLevelName(RUN_LEVEL, "RUN")
 LOG_LEVELS = {
@@ -454,6 +459,139 @@ def confirm_delete_if_required(page):
 
     return True
 
+def select_block_checkbox(page, static_cb, safe_label, max_attempts=3, force_reselect=False):
+    """Гарантирует, что чекбокс блока выбран (aria-checked="true").
+    
+    Параметры:
+      - page: объект Page Playwright
+      - static_cb: локатор чекбокса
+      - safe_label: экранированный aria-label для селектора
+      - max_attempts: количество попыток клика (дефолт 3)
+      - force_reselect: если True и чекбокс уже выбран, сначала снимает выделение и ставит заново
+    
+    Возвращает:
+      True, если чекбокс успешно выбран и подтвержден в DOM, иначе False.
+    """
+    if not force_reselect:
+        try:
+            if static_cb.get_attribute("aria-checked") == "true":
+                return True
+        except Exception:
+            pass
+    else:
+        try:
+            if static_cb.get_attribute("aria-checked") == "true":
+                static_cb.click(force=True, timeout=2000)
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    page.bring_to_front()
+    page.locator('body').focus()
+
+    try:
+        static_cb.scroll_into_view_if_needed(timeout=2000)
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+    for attempt in range(max_attempts):
+        try:
+            static_cb.click(force=True, timeout=3000)
+            page.wait_for_selector(
+                f'div[role="checkbox"][aria-label="{safe_label}"][aria-checked="true"]',
+                state='attached',
+                timeout=3000
+            )
+            return True
+        except Exception:
+            try:
+                static_cb.evaluate("el => el.click()")
+                page.wait_for_timeout(1000)
+                if static_cb.get_attribute("aria-checked") == "true":
+                    return True
+            except Exception:
+                if attempt == max_attempts - 1:
+                    logging.warning("⚠️ Все попытки клика (включая JS) не удались.")
+            page.wait_for_timeout(1000)
+
+    return False
+
+def download_block_with_retry(page, static_cb, safe_label, temp_dir, timeout_ms=120000, max_retries=3):
+    """Скачивает блок фото с повторными попытками и re-click при таймауте или сбое.
+    
+    Алгоритм:
+      1. Проверяет доступность страницы и валидность сессии Google.
+      2. Убеждается, что чекбокс блока выбран (на повторных попытках > 1 выполняет re-click/re-select).
+      3. Переводит фокус на body страницы и нажимает Shift+D внутри ожидания page.expect_download.
+      4. Проверяет, что скачанный файл не пуст (размер > 0 байт) и сохраняет его в temp_dir.
+      5. При таймауте или ошибке повторяет процесс до max_retries раз перед аварийной остановкой.
+    """
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        if page.is_closed():
+            raise RuntimeError("Окно браузера закрыто.")
+
+        if is_login_page(page):
+            log_run("⚠️ Сессия Google Photos истекла во время скачивания. Ожидаем повторной авторизации...")
+            ensure_authenticated(page, context="download retry")
+
+        force_reselect = (attempt > 1)
+        is_selected = select_block_checkbox(
+            page, static_cb, safe_label, max_attempts=3, force_reselect=force_reselect
+        )
+        if not is_selected:
+            err_msg = f"Не удалось выделить чекбокс блока '{safe_label}'"
+            last_error = RuntimeError(err_msg)
+            if attempt < max_retries:
+                logging.warning(f"⚠️ {err_msg} перед скачиванием (попытка {attempt}/{max_retries}). Пауза перед retry...")
+                page.wait_for_timeout(2000)
+                continue
+            else:
+                logging.error(f"❌ {err_msg} после {max_retries} попыток.")
+                raise last_error
+
+        page.bring_to_front()
+        page.locator('body').focus()
+        page.wait_for_timeout(500)
+
+        timeout_sec = int(timeout_ms / 1000)
+        log_debug(f"⬇️ Запрашиваем скачивание через Shift+D (попытка {attempt}/{max_retries}, таймаут {timeout_sec} с)...")
+
+        download_path = None
+        try:
+            with page.expect_download(timeout=timeout_ms) as download_info:
+                page.keyboard.press("Shift+D")
+                download = download_info.value
+
+            download_path = os.path.join(temp_dir, download.suggested_filename)
+            download.save_as(download_path)
+
+            if os.path.exists(download_path) and os.path.getsize(download_path) == 0:
+                raise RuntimeError(f"Скачанный файл пуст (0 байт): {download.suggested_filename}")
+
+            log_info(f"📥 Скачан файл: {download.suggested_filename} (попытка {attempt}/{max_retries})")
+            return download_path
+
+        except Exception as e:
+            last_error = e
+            if download_path and os.path.exists(download_path):
+                try:
+                    os.remove(download_path)
+                except Exception:
+                    pass
+
+            if attempt < max_retries:
+                logging.warning(
+                    f"⚠️ Таймаут/ошибка скачивания блока (попытка {attempt}/{max_retries}): {e}. "
+                    f"Повторяем с re-click через 2 сек..."
+                )
+                page.wait_for_timeout(2000)
+            else:
+                logging.error(f"❌ Не удалось скачать блок после {max_retries} попыток: {e}")
+                raise last_error
+
 def get_verified_file_count(entry):
     files = entry.get("files") or []
     return len(files) if files else 1
@@ -840,38 +978,7 @@ def main():
             safe_label = aria_label.replace('"', '\\"') # Экранируем возможные кавычки
             static_cb = page.locator(f'div[role="checkbox"][aria-label="{safe_label}"]').first
             
-            is_checked = False
-            
-            # Обязательно скроллим к элементу, чтобы React Virtual DOM отрендерил его
-            try:
-                static_cb.scroll_into_view_if_needed(timeout=2000)
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-            
-            for attempt in range(3):
-                try:
-                    # Кликаем по статичному локатору (force=True пробивает плавающие панели)
-                    static_cb.click(force=True, timeout=3000)
-                    
-                    # Ждем, пока именно этот элемент получит статус aria-checked="true"
-                    page.wait_for_selector(f'div[role="checkbox"][aria-label="{safe_label}"][aria-checked="true"]', state='attached', timeout=3000)
-                    is_checked = True
-                    break
-                except Exception as e:
-                    # В случае ошибки интерфейса, пробуем запасной JS-клик
-                    try:
-                        static_cb.evaluate("el => el.click()")
-                        page.wait_for_timeout(1000)
-                        if static_cb.get_attribute("aria-checked") == "true":
-                            is_checked = True
-                            break
-                    except Exception as inner_e:
-                        if attempt == 2: # Логируем только если все 3 попытки (включая JS) провалились
-                            logging.warning("⚠️ Все попытки клика (включая JS) не удались.")
-                        
-                    page.wait_for_timeout(1000)
-                
+            is_checked = select_block_checkbox(page, static_cb, safe_label, max_attempts=3)
             if not is_checked:
                 logging.error("❌ Не удалось выделить фото (галочка не поставилась после 3 попыток). Скрипт остановлен.")
                 break
@@ -882,43 +989,46 @@ def main():
             zip_stats = {"processed": 0, "size": 0, "new": 0, "success": False, "verified": False, "files": []}
             
             if should_download:
-                # 3. Скачиваем (эмуляция Shift+D)
+                # 3. Скачиваем (эмуляция Shift+D с retry)
                 log_debug("⬇️ Запрашиваем скачивание (архива или файла)...")
                 try:
-                    with page.expect_download(timeout=120000) as download_info:
-                        page.keyboard.press("Shift+D")
-                        download = download_info.value
+                    download_path = download_block_with_retry(
+                        page=page,
+                        static_cb=static_cb,
+                        safe_label=safe_label,
+                        temp_dir=TEMP_DIR,
+                        timeout_ms=DOWNLOAD_TIMEOUT_MS,
+                        max_retries=DOWNLOAD_MAX_RETRIES
+                    )
+                    
+                    # 4. Обрабатываем и сортируем на D:\
+                    zip_stats = process_downloaded_file(download_path, ui_year)
+                    success = zip_stats["success"]
+                    
+                    if success:
+                        if not zip_stats.get("verified"):
+                            mark_block_error(manifest, block_id, "Downloaded files were not fully verified on disk")
+                            logging.warning("⚠️ Файлы скачаны, но локальная проверка hash не подтверждена. Удаление запрещено.")
+                            break
+                        mark_block_verified(manifest, block_id, zip_stats)
+                        if block_type == "group":
+                            mark_date_covered(manifest, photo_date, block_id, zip_stats)
+                        block_verified = True
+                        manifest_entry = manifest["blocks"][block_id]
+                        batch_size_str = format_size(zip_stats["size"])
+                        log_info(f"📊 Порция: {zip_stats['processed']} файлов (новых: {zip_stats['new']}), объем: {batch_size_str}")
                         
-                        download_path = os.path.join(TEMP_DIR, download.suggested_filename)
-                        download.save_as(download_path)
-                        log_info(f"📥 Скачан файл: {download.suggested_filename}")
+                        stats["total_bytes"] += zip_stats["size"]
+                        stats["new_downloaded"] += zip_stats["new"]
+                        if zip_stats["new"] > 0 and photo_date:
+                            stats["downloaded_dates"].append(photo_date)
+                    else:
+                        mark_block_error(manifest, block_id, "Archive processing returned empty or unverified files")
+                        logging.warning("⚠️ Архив оказался пуст или произошла ошибка. Пропускаем удаление.")
+                        break # Останавливаем скрипт от греха подальше
                         
-                        # 4. Обрабатываем и сортируем на D:\
-                        zip_stats = process_downloaded_file(download_path, ui_year)
-                        success = zip_stats["success"]
-                        
-                        if success:
-                            if not zip_stats.get("verified"):
-                                mark_block_error(manifest, block_id, "Downloaded files were not fully verified on disk")
-                                logging.warning("⚠️ Файлы скачаны, но локальная проверка hash не подтверждена. Удаление запрещено.")
-                                break
-                            mark_block_verified(manifest, block_id, zip_stats)
-                            if block_type == "group":
-                                mark_date_covered(manifest, photo_date, block_id, zip_stats)
-                            block_verified = True
-                            manifest_entry = manifest["blocks"][block_id]
-                            batch_size_str = format_size(zip_stats["size"])
-                            log_info(f"📊 Порция: {zip_stats['processed']} файлов (новых: {zip_stats['new']}), объем: {batch_size_str}")
-                            
-                            stats["total_bytes"] += zip_stats["size"]
-                            stats["new_downloaded"] += zip_stats["new"]
-                            if zip_stats["new"] > 0 and photo_date:
-                                stats["downloaded_dates"].append(photo_date)
-                        else:
-                            logging.warning("⚠️ Архив оказался пуст или произошла ошибка. Пропускаем удаление.")
-                            break # Останавливаем скрипт от греха подальше
-                            
                 except Exception as e:
+                    mark_block_error(manifest, block_id, f"Download failed: {e}")
                     logging.error(f"❌ Ошибка при скачивании блока: {e}")
                     log_run("Скрипт остановлен для безопасности.")
                     break
@@ -958,15 +1068,10 @@ def main():
                             page.wait_for_timeout(1000)
                             if static_cb.get_attribute("aria-checked") != "true":
                                 log_debug("🔄 Восстанавливаем выделение перед удалением (Google сбросил его)...")
-                                page.bring_to_front()
-                                page.locator('body').focus()
-                                try:
-                                    static_cb.scroll_into_view_if_needed(timeout=2000)
-                                    page.wait_for_timeout(500)
-                                    static_cb.click(force=True, timeout=3000)
-                                except Exception:
-                                    static_cb.evaluate("el => el.click()")
-                                page.wait_for_selector(f'div[role="checkbox"][aria-label="{safe_label}"][aria-checked="true"]', state='attached', timeout=5000)
+                                if not select_block_checkbox(page, static_cb, safe_label, max_attempts=3):
+                                    logging.error("❌ Не удалось восстановить выделение перед удалением. Удаление отменено.")
+                                    page.keyboard.press("Escape")
+                                    continue
 
                         # 5. УДАЛЕНИЕ (только если скачивание успешно или пропущено, и возраст > DAYS_TO_KEEP_IN_CLOUD)
                         log_info("🗑️ Удаляем фото из облака...")

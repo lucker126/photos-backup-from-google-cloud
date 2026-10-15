@@ -31,10 +31,10 @@
 ### UI-автоматизация
 | Функция | Назначение |
 |---------|-----------|
-| `parse_manual_date_from_display_article()` | Находит DOM-элементы без `aria-label` через JS evaluate |
-| `google_photos_select_and_download_block()` | Клик с 3 попытками + JS fallback, Shift+D, таймаут 120s |
-| `_parse_additional_metadata()` | Извлекает "Фото · X items" → count |
-| `select_and_delete_group()` | JS evaluate для поиска-выбора-удаления группы |
+| `select_block_checkbox()` | Надежный выбор чекбокса блока (3 попытки + JS fallback, проверка `aria-checked`, поддержка force re-click) |
+| `download_block_with_retry()` | Скачивание через `Shift+D` с перехватом `expect_download`, детекцией 0-байт, повторными попытками до `DOWNLOAD_MAX_RETRIES` и re-click |
+| `confirm_delete_if_required()` | Подтверждение диалога удаления в корзину (с динамическим поиском кнопок и поддержкой тихого удаления) |
+| `wait_for_delete_completion()` | Ожидание исчезновения удаленного блока из DOM |
 
 ### Оркестратор
 | Функция | Назначение |

@@ -20,6 +20,8 @@
 | `SCROLL_STEP_PIXELS` | int | `500` | Шаг прокрутки галереи в пикселях |
 | `SCROLL_WAIT_MS` | int | `1500` | Пауза после прокрутки (мс), чтобы React успел отрендерить |
 | `AUTH_WAIT_TIMEOUT_MS` | int | `300000` | Сколько ждать ручного входа/2FA (мс) при обнаружении формы логина — на старте и при истечении сессии посреди рана. Минимум 30000 |
+| `DOWNLOAD_TIMEOUT_MS` | int | `120000` | Таймаут ожидания скачивания ZIP/файла (мс) через Playwright `expect_download`. Минимум 10000 |
+| `DOWNLOAD_MAX_RETRIES` | int | `3` | Количество попыток скачивания блока при таймауте/сбое (с re-click и повторным `Shift+D`). Минимум 1 |
 
 ## Alias-ключи
 
@@ -41,6 +43,8 @@
 | `SCROLL_STEP_PIXELS` | `scroll_step_pixels` |
 | `SCROLL_WAIT_MS` | `scroll_wait_ms` |
 | `AUTH_WAIT_TIMEOUT_MS` | `auth_wait_timeout_ms` |
+| `DOWNLOAD_TIMEOUT_MS` | `download_timeout_ms` |
+| `DOWNLOAD_MAX_RETRIES` | `download_max_retries` |
 
 При чтении значение из любого alias'а имеет приоритет над дефолтом.
 
@@ -61,7 +65,9 @@
     "LOG_LEVEL": "WARNING",
     "SCROLL_STEP_PIXELS": 500,
     "SCROLL_WAIT_MS": 1500,
-    "AUTH_WAIT_TIMEOUT_MS": 300000
+    "AUTH_WAIT_TIMEOUT_MS": 300000,
+    "DOWNLOAD_TIMEOUT_MS": 120000,
+    "DOWNLOAD_MAX_RETRIES": 3
 }
 ```
 
